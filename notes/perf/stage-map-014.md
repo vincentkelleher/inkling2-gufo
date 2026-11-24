@@ -114,3 +114,24 @@ bandwidth; no kernel change available in a single iteration can move it more tha
 ~10 %, and only by attacking gaps/fusion. Prefill has a 36 %-wide GEMM target and
 a 9.6 % conversion bucket that looks like the cheapest 5–9 % in the whole map.
 Both tasks stay open until one of those is landed with numbers.
+
+## Follow-up: are the 2.4 ms of gaps launch overhead? No.
+
+Interleaved test, `decode-4k`, one fresh load per side, `INKLING2_LOOKUP=0`,
+two pairs: graphs on 44.0 / 44.0 tok/s, `INKLING2_NOGRAPH=1` 44.1 / 44.2. The
+captured-graph path is a no-op for speed here, so the 2,412 µs between kernels
+are *dependency stalls* (a 5–25 µs kernel the next launch waits on), not launch
+cost. That removes "turn on HIP graphs" from the candidate list and leaves fusion
+of the small dependent kernels as the only way to touch those 10 %.
+
+Per-kernel counts in one decode step (671 launches, from the same trace): 44
+`k_moe_gu<1,…>` (113 µs each), 44 `k_moe_down_e<1,…>` (58 µs), 48
+`k_gemv_multi` (98 µs) for the attn projections, 48 `k_gemv<0,3072,…>` (37 µs,
+o-proj), 1 `k_gemv<0,2304,…>` (2,198 µs, lm_head), 48 `attn_decode<4>` (24 µs),
+**119 `k_mix`** (6.7 µs), 48 `k_router` (8.3 µs), 48 `k_ctl_gate` + 48
+`k_ctl_apply` (6.9 + 6.6 µs), 49 `k_rms` (5.8 µs). The 6–9 µs kernels are 320
+launches of the step and cost ~1.7 ms of work plus their share of the stalls.
+
+Prefill, same file, by name: `k_gemm4` variants 56.4 % (88 + 88 + 480 + 96 + 8
+launches), `attn_prefill` 6.3 %, `k_ctl_apply_w` 4.8 %, `mix_k` 4.4 %, `k_gate_p`
+3.7 % (224 launches), `k_gate_wh` 3.7 %, `k_sum_pairs` 2.5 %.

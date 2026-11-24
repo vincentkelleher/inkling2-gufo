@@ -135,3 +135,29 @@ launches of the step and cost ~1.7 ms of work plus their share of the stalls.
 Prefill, same file, by name: `k_gemm4` variants 56.4 % (88 + 88 + 480 + 96 + 8
 launches), `attn_prefill` 6.3 %, `k_ctl_apply_w` 4.8 %, `mix_k` 4.4 %, `k_gate_p`
 3.7 % (224 launches), `k_gate_wh` 3.7 %, `k_sum_pairs` 2.5 %.
+
+## Next iteration, scoped from the map (not from guessing)
+
+**Decode — fuse the small dependent kernels (target: the 320 launches of 6–9 µs).**
+One step is 671 launches; 320 of them are `k_mix` (119), `k_ctl_gate` (48),
+`k_ctl_apply` (48), `k_router` (48), `k_rms` (49), each doing 5–9 µs of work.
+With graphs proven to be a no-op and the stalls measured at 2.4 ms, the win is
+fewer, fatter kernels. Smallest credible first step: fold the two `k_mix` calls
+of a visit into one launch (a 2-D grid over both outputs, same arithmetic per
+row) and measure with `ab.sh --cases decode-4k,decode-short --reps 3
+--mode lookup-off/dspark-off`. Expected order: 1–3 % (≈200–400 µs of the 23.4 ms
+step). Do **not** start with the controllers: they are sequential (gate → apply)
+and cannot be fused without a persistent-kernel rewrite.
+
+**Prefill — the conversion/routing bucket, then the GEMM.**
+`k_gate_p` (224 launches), `k_sum_pairs` (96) and the conversion kernels are
+~10 % of the window at 13–31 µs/token with no FLOPs in them. First question to
+answer from the code: how many of those runs are per loop pass over a buffer
+that is identical across passes — if any, hoisting them is a cheap 2–5 %.
+Only after that, the GEMM: `k_gemm4` variants are 56 % of the window at ~24 of
+55 TFLOPS and need the wave-tile rewrite (lab H2–H4), which is a project.
+
+**Gate for both:** `tests/perf/ab.sh` against the shipped image, `--reps 3`,
+pinned nonce; accept only if the pair ratios agree in sign and clear 1 % (decode)
+/ 1.5 % (prefill). Quality: mean KL ≤ 1e-3, ≥ 98 % top-1 via the oracle tests if
+the numerics change at all.
